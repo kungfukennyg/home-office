@@ -72,6 +72,24 @@ func (mc ModeCommand) run(cont *controller) (time.Duration, error) {
 		for _, d := range cont.devices {
 			cont.SetStatus(d, true)
 		}
+	case "scenes":
+		if len(args) < 2 {
+		fmt.Println("[ModeCommand.run] Usage: scenes (list/add/remove)")
+		return time.Second, nil
+	}
+		args = args[1:]
+		sub := args[0]
+
+		switch sub {
+		case "list":
+			
+		}
+
+	case "modes":
+		fmt.Println("[ModeCommand.run] Modes:")
+		for id := range cont.modes {
+			fmt.Printf("\t%s\n", id)
+		}
 	case "exit":
 		cont.running = false
 	case ModeExperimentID, ModeRainbowID, ModeRollID:
