@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"math/rand"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gosuri/uilive"
+	"github.com/kungfukennyg/home-office/cync-lights/log"
 	"github.com/pkg/errors"
 	"github.com/unixpickle/cbyge"
 )
@@ -30,15 +35,26 @@ func (mc *ModeCommand) onSwitch(cont *controller) error {
 }
 
 func (mc ModeCommand) run(cont *controller) (time.Duration, error) {
-	command := scanInput("ModeCommand.run", "enter command: (printDevices, switchMode, off, exit)")
+	// get a command
+	outputWriter := log.New()
+	outputWriter.Start()
+	defer outputWriter.Stop()
+	log.FPrintln(outputWriter, "Enter command (h for help):")
+
+	input := bufio.NewScanner(os.Stdin)
+	input.Scan()
+	command := strings.Trim(input.Text(), "\n")
 	args := strings.Split(command, " ")
 	if len(args) < 1 {
 		return time.Second, nil
 	}
+
 	switch strings.ToLower(args[0]) {
+	case "h", "help":
+		log.FPrintf(outputWriter, "help, on, off, modes, switchmode, printdevices, exit\n")
 	case "switchmode":
 		if len(args) < 2 || strings.Trim(args[1], " ") == "" {
-			fmt.Println("[ModeCommand.run] Usage: switchMode <mode>")
+			log.FPrintf(outputWriter, "Usage: switchMode <mode>\n")
 			return time.Second, nil
 		}
 		err := cont.SwitchMode(args[1])
@@ -47,24 +63,27 @@ func (mc ModeCommand) run(cont *controller) (time.Duration, error) {
 		}
 	case "printdevices":
 		cont.refreshDeviceCache()
+		// TODO: proper logging
 		cont.PrintDevices()
-	case "off":
+	case "turnoff", "off":
 		for _, d := range cont.devices {
 			cont.SetStatus(d, false)
 		}
-	case "on":
+	case "turnon", "on":
 		for _, d := range cont.devices {
 			cont.SetStatus(d, true)
 		}
-	case "modes":
-		fmt.Println("[ModeCommand.run] Modes:")
+	case "listmodes", "modes":
+		line := "\t"
 		for id := range cont.modes {
-			fmt.Printf("\t%s\n", id)
+			line += id + ", "
 		}
+		line = line[:len(line)-2] + "\n"
+		log.FPrintf(outputWriter, line)
 	case "exit":
 		cont.running = false
 	default:
-		fmt.Printf("[ModeCommand.run] unrecognized command %s\n", command)
+		log.FPrintf(outputWriter, "unrecognized command %s", command)
 	}
 	return 100 * time.Millisecond, nil
 }
@@ -204,23 +223,34 @@ type ModePretty struct {
 	randomColors   bool
 	slowTransition bool
 	lastColor      map[string]RGB
+
+	// logging writers
+	writer     *uilive.Writer
+	otherLines map[string]io.Writer
 }
 
 func (mc *ModePretty) onSwitch(cont *controller) error {
-	input := strings.Trim(scanInput("ModePretty.onSwitch", "Choose colors randomly"), " \n")
+	mc.writer = log.New()
+
+	mc.writer.Start()
+
+	input := scanInputV2(mc.writer, "Choose colors randomly? (true/t/false/f)")
 	randomColors, err := strconv.ParseBool(input)
 	if err != nil {
-		return errors.Wrap(err, "value must be true/false")
+		return errors.Wrap(err, "value must be one of: (true/t/false/f)")
 	}
 	mc.randomColors = randomColors
 
-	input = strings.Trim(scanInput("ModePretty.onSwitch", "Slow transition colors"), " \n")
+	input = scanInputV2(mc.writer, "Slow transition colors? (true/t/false/f)")
 	slowTransition, err := strconv.ParseBool(input)
 	if err != nil {
-		return errors.Wrap(err, "value must be true/false")
+		return errors.Wrap(err, "value must be one of: (true/t/false/f)")
 	}
+	log.FPrintln(mc.writer, fmt.Sprintf("Starting %s mode...", ModePrettyID))
 	mc.slowTransition = slowTransition
 	rand.Seed(time.Now().UnixNano())
+	mc.writer.Stop()
+	mc.writer = nil
 	return nil
 }
 
@@ -243,23 +273,32 @@ func (mc *ModePretty) run(cont *controller) (time.Duration, error) {
 	// 	}
 	// }
 
+	if mc.writer == nil {
+		mc.writer = log.New()
+		devices := make(map[string]io.Writer, len(cont.devices))
+		for _, d := range cont.devices {
+			if cont.debug {
+				fmt.Printf("creating writer for device %s\n", d.Name())
+			}
+			devices[d.DeviceID()] = mc.writer.Newline()
+		}
+		mc.otherLines = devices
+		mc.writer.Start()
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(len(cont.devices))
-	lastDeviceColor := -1
+	log.FPrintf(mc.writer, "Pretty mode (random: %v, smoothTransition: %v)...\n", mc.randomColors, mc.slowTransition)
 	for _, device := range cont.devices {
 		var color RGB
 		if mc.randomColors {
-			var colorIndex int
-			if lastDeviceColor != -1 {
-				for i := 0; i < 5; i++ {
-					colorIndex = indexRandom(cont)
-					if colorIndex != lastDeviceColor {
-						break
-					}
+			lastColor, ok := mc.lastColor[device.DeviceID()]
+			for {
+				color = prettyColors[indexRandom(cont)]
+				if !ok || (ok && !lastColor.equals(color)) {
+					break
 				}
 			}
-			lastDeviceColor = colorIndex
-			color = prettyColors[colorIndex]
 		} else {
 			color = prettyColors[mc.indexIncremental(device)]
 		}
@@ -275,11 +314,20 @@ func (mc *ModePretty) run(cont *controller) (time.Duration, error) {
 			cont.SetRGBAsync(device, color)
 		}
 		mc.lastColor[device.DeviceID()] = color
+		deviceWriter := mc.otherLines[device.DeviceID()]
+		rgbStr := "["
+		for _, val := range color {
+			rgbStr += fmt.Sprintf("%03d, ", val)
+		}
+		rgbStr = rgbStr[:len(rgbStr)-2] + "]"
+		log.FPrintf(deviceWriter, "%s (%s) - %s\n", rgbStr, colorNames[color], device.Name())
 	}
 
 	if mc.slowTransition {
 		wg.Wait()
 	}
+
+	log.FPrintln(mc.writer, "")
 
 	return 50 * time.Millisecond, nil
 }
@@ -304,6 +352,8 @@ func (mc *ModePretty) indexIncremental(device *cbyge.ControllerDevice) int {
 }
 
 func (mc ModePretty) onExit(cont *controller) {
+	log.FPrintln(mc.writer, "Exiting pretty mode...")
+	mc.writer.Stop()
 	//
 }
 

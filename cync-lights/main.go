@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kungfukennyg/home-office/cync-lights/log"
 	"github.com/pkg/errors"
 	"github.com/unixpickle/cbyge"
 )
@@ -39,6 +40,14 @@ func main() {
 
 	debug := isDebug(args)
 
+	if debug {
+		// BaseUiLiveSingleLineTest()
+		// BaseUiLiveMultiLineTest()
+		// LoggerSingleLineTest()
+		// LoggerMultiLineTest(2)
+		// time.Sleep(10 * time.Second)
+	}
+
 	var geController *cbyge.Controller
 	cachedSession := os.Getenv(CyncSession)
 	if cachedSession != "" {
@@ -48,7 +57,9 @@ func main() {
 			fmt.Printf("[main] couldn't unmarshal cached session info %v", sessionInfo)
 			os.Exit(5)
 		}
-		fmt.Printf("[main] logging in with cached session info %v\n", cachedSession)
+		if debug {
+			fmt.Printf("[main] logging in with cached session info %v\n", cachedSession)
+		}
 		geController = cbyge.NewController(&sessionInfo, timeout)
 	} else {
 		user, pass := parseArgs(args)
@@ -152,7 +163,7 @@ func (c *controller) run() (time.Duration, error) {
 	if c.mode.isIndefinite() {
 	outer:
 		for {
-			fmt.Println("[controller.run] Exit? (press any key)")
+			// fmt.Println("[controller.run] Exit? (press any key)")
 			in := c.readInput()
 			select {
 			case stdIn, ok := <-in:
@@ -178,16 +189,10 @@ func (c *controller) run() (time.Duration, error) {
 		c.refreshDeviceCache()
 	}
 
-	fmt.Println("\r[controller.run] state:")
-	fmt.Printf("     \rrunning: %v\n", c.running)
-	fmt.Printf("     \rmode: %v - %+v\n", c.mode.getId(), c.mode)
 	if c.debug {
-		time.Sleep(2 * time.Second)
-		fmt.Println("\r[controller.run] polling devices...")
-		// err := c.PrintDevices()
-		// if err != nil {
-		// 	fmt.Printf("[controller.run] failed to print devices: %v\n", err)
-		// }
+		fmt.Println("\r[controller.run] state:")
+		fmt.Printf("     \rrunning: %v\n", c.running)
+		fmt.Printf("     \rmode: %v - %+v\n", c.mode.getId(), c.mode)
 	}
 	sleepTime, err := c.mode.run(c)
 	if err != nil && !errors.Is(err, &ErrSwitchMode{}) {
@@ -368,6 +373,13 @@ func (c *controller) SwitchMode(newMode string) error {
 
 func scanInput(component string, prompt string) string {
 	fmt.Printf("\r[%s] %s: ", component, prompt)
+	input := bufio.NewScanner(os.Stdin)
+	input.Scan()
+	return strings.Trim(input.Text(), "\n")
+}
+
+func scanInputV2(writer io.Writer, str string) string {
+	log.FPrintln(writer, str)
 	input := bufio.NewScanner(os.Stdin)
 	input.Scan()
 	return strings.Trim(input.Text(), "\n")
