@@ -25,6 +25,8 @@ type controller struct {
 	modes                map[string]Mode
 	devices              []*cbyge.ControllerDevice
 	devicesLastUpdatedAt time.Time
+	userinput            chan string
+	closeCh              chan<- struct{}
 }
 
 type ErrSwitchMode struct {
@@ -147,8 +149,7 @@ func newController(comp *cbyge.Controller, debug bool) (*controller, error) {
 		modes:   map[string]Mode{},
 	}
 	c.modes[ModeCommandID] = &ModeCommand{}
-	c.modes[ModeRainbowID] = &ModeRainbow{rgbs: make(map[string]*RGB)}
-	c.modes[ModePrettyID] = &ModePretty{colorIndices: map[string]int{}, lastColor: map[string]RGB{}}
+	c.modes[ModeRainbowID] = &ModeRainbow{lastColor: map[string]RGB{}}
 	c.modes[ModeExperimentID] = &ModeExperiment{}
 	// pre-load devices
 	err := c.refreshDeviceCache()
@@ -161,32 +162,31 @@ func newController(comp *cbyge.Controller, debug bool) (*controller, error) {
 func (c *controller) run() (time.Duration, error) {
 	// break indefinite modes on user input
 	if c.mode.isIndefinite() {
+		if c.userinput == nil {
+			userInputCh, closeCh := log.ListenForInputAsync()
+			c.userinput = userInputCh
+			c.closeCh = closeCh
+		}
 	outer:
 		for {
-			// fmt.Println("[controller.run] Exit? (press any key)")
-			in := c.readInput()
 			select {
-			case stdIn, ok := <-in:
+			case input, ok := <-c.userinput:
 				if !ok {
 					break outer
 				}
 
-				if len(stdIn) > 0 {
-					if c.debug {
-						fmt.Printf("[controller.run] got input %s\n", stdIn)
-					}
-					c.SwitchMode(ModeCommandID)
-					return 50 * time.Millisecond, nil
+				if c.debug {
+					fmt.Printf("got user input %s (len %d)\n", input, len(input))
 				}
-			case <-time.After(250 * time.Millisecond):
+
+				if len(input) > 1 {
+					c.SwitchMode(ModeCommandID)
+					return time.Millisecond, nil
+				}
+			case <-time.After(50 * time.Millisecond):
 				break outer
 			}
 		}
-	}
-
-	// update local device cache periodically
-	if time.Since(c.devicesLastUpdatedAt) > (30 * time.Second) {
-		c.refreshDeviceCache()
 	}
 
 	if c.debug {
@@ -204,25 +204,6 @@ func (c *controller) run() (time.Duration, error) {
 	}
 
 	return sleepTime, nil
-}
-
-func (c *controller) readInput() <-chan string {
-	ch := make(chan string)
-	go func(ch chan<- string) {
-		reader := bufio.NewReader(os.Stdin)
-		for {
-			time.Sleep(50 * time.Millisecond)
-			s, err := reader.ReadString('\n')
-			if err != nil && err != io.EOF {
-				if c.debug {
-					fmt.Println("[controller.run] failed to read stdin, continuing...")
-				}
-				continue
-			}
-			ch <- s
-		}
-	}(ch)
-	return ch
 }
 
 // Doesn't work ):
@@ -367,7 +348,15 @@ func (c *controller) SwitchMode(newMode string) error {
 			modeId: newMode,
 		}
 	}
+	if c.debug {
+		fmt.Printf("[controller.SwitchMode] changing to mode %v\n", newMode)
+	}
 	c.mode = mode
+	if c.mode.isIndefinite() && c.userinput != nil {
+		c.closeCh <- struct{}{}
+		c.closeCh = nil
+		c.userinput = nil
+	}
 	return c.mode.onSwitch(c)
 }
 
@@ -379,7 +368,7 @@ func scanInput(component string, prompt string) string {
 }
 
 func scanInputV2(writer io.Writer, str string) string {
-	log.FPrintln(writer, str)
+	log.FPrintln(writer, log.MainColor, str)
 	input := bufio.NewScanner(os.Stdin)
 	input.Scan()
 	return strings.Trim(input.Text(), "\n")

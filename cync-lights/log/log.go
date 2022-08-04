@@ -1,12 +1,17 @@
 package log
 
 import (
-	"fmt"
 	"io"
 	"time"
 
+	"github.com/fatih/color"
+
 	"github.com/gosuri/uilive"
 )
+
+const MainColor = color.FgBlue
+const OutputColor = color.FgGreen
+const BadColor = color.FgRed
 
 func New() *uilive.Writer {
 	writer := uilive.New()
@@ -14,16 +19,12 @@ func New() *uilive.Writer {
 	return writer
 }
 
-func FPrintf(writer io.Writer, format string, a ...any) (int, error) {
-	if len(a) > 0 {
-		return fmt.Fprintf(writer, format, a...)
-	} else {
-		return fmt.Fprintf(writer, format, a...)
-	}
+func FPrintf(writer io.Writer, c color.Attribute, format string, a ...any) (int, error) {
+	return color.New(c).Fprintf(writer, format, a...)
 }
 
-func FPrintln(writer io.Writer, ln string) (read int, err error) {
-	read, err = fmt.Fprintln(writer, ln)
+func FPrintln(writer io.Writer, c color.Attribute, ln string) (read int, err error) {
+	read, err = color.New(c).Fprintln(writer, ln)
 	if err != nil {
 		return read, err
 	}
