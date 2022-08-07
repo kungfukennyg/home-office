@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/kungfukennyg/home-office/cync-lights/colors"
 	"github.com/kungfukennyg/home-office/cync-lights/log"
+	"github.com/kungfukennyg/home-office/cync-lights/optional"
 	"github.com/pkg/errors"
 	"github.com/unixpickle/cbyge"
 )
@@ -27,6 +29,8 @@ type controller struct {
 	devicesLastUpdatedAt time.Time
 	userinput            chan string
 	closeCh              chan<- struct{}
+
+	lastColor map[string]colors.RGB
 }
 
 type ErrSwitchMode struct {
@@ -73,7 +77,7 @@ func main() {
 			if pass == "" {
 				ret = ret + ", cync password"
 			}
-			fmt.Printf("[main] couldn't find %s\n, checking env", ret)
+			fmt.Printf("[main] couldn't find %s checking env\n", ret)
 			user, pass = loadEnv()
 		}
 		if debug {
@@ -143,14 +147,19 @@ func isDebug(args []string) bool {
 
 func newController(comp *cbyge.Controller, debug bool) (*controller, error) {
 	c := controller{
-		wrapped: comp,
-		running: true,
-		debug:   debug,
-		modes:   map[string]Mode{},
+		wrapped:   comp,
+		running:   true,
+		debug:     debug,
+		modes:     map[string]Mode{},
+		lastColor: map[string]colors.RGB{},
 	}
 	c.modes[ModeCommandID] = &ModeCommand{}
-	c.modes[ModeRainbowID] = &ModeRainbow{lastColor: map[string]RGB{}}
+	c.modes[ModeRainbowID] = &ModeRainbow{}
 	c.modes[ModeExperimentID] = &ModeExperiment{}
+	c.modes[ModeRollID] = &ModeRoll{
+		colors:     colors.BaseColors,
+		otherLines: map[string]io.Writer{},
+	}
 	// pre-load devices
 	err := c.refreshDeviceCache()
 	if err != nil {
@@ -272,18 +281,22 @@ func (c *controller) refreshDeviceCache() error {
 	return nil
 }
 
-func (c *controller) SetRGBAsync(device *cbyge.ControllerDevice, rgb RGB) error {
+func (c *controller) SetRGBAsync(device *cbyge.ControllerDevice, color colors.RGB) error {
 	if c.debug {
-		fmt.Printf("[controller.SetRGB] setting rgb to %+v\n", rgb)
+		fmt.Printf("[controller.SetRGBAsync] setting rgb to %+v\n", color)
 	}
-	return c.wrapped.SetDeviceRGBAsync(device, rgb[0], rgb[1], rgb[2])
+
+	c.lastColor[device.DeviceID()] = color
+	return c.wrapped.SetDeviceRGB(device, color.RGBA.R, color.RGBA.G, color.RGBA.B)
 }
 
-func (c *controller) SetRGB(device *cbyge.ControllerDevice, rgb RGB) error {
+func (c *controller) SetRGB(device *cbyge.ControllerDevice, color colors.RGB) error {
 	if c.debug {
-		fmt.Printf("[controller.SetRGB] setting rgb to %+v\n", rgb)
+		fmt.Printf("[controller.SetRGB] setting rgb to %+v\n", color)
 	}
-	return c.wrapped.SetDeviceRGB(device, rgb[0], rgb[1], rgb[2])
+
+	c.lastColor[device.DeviceID()] = color
+	return c.wrapped.SetDeviceRGB(device, color.RGBA.R, color.RGBA.G, color.RGBA.B)
 }
 
 func (c *controller) SetLum(device *cbyge.ControllerDevice, lum int) error {
@@ -300,45 +313,6 @@ func (c *controller) SetLumAsync(device *cbyge.ControllerDevice, lum int) error 
 	}
 
 	return c.wrapped.SetDeviceLumAsync(device, lum)
-}
-
-func (c *controller) smoothTransitionRGB(device *cbyge.ControllerDevice,
-	old, new RGB, steps int, wg *sync.WaitGroup, pause time.Duration) {
-	diff := old.sub(new)
-	if c.debug {
-		fmt.Printf("[controller.smoothTransitionRGB] old %v, new %+v\n", old, new)
-		fmt.Printf("[controller.smoothTransitionRGB] diff after sub-ing: %+v\n", diff)
-	}
-	go func() {
-		for i := 1; i < steps+1; i++ {
-			curIdx := uint8(i)
-			transition := RGB{
-				diff[0] / curIdx,
-				diff[1] / curIdx,
-				diff[2] / curIdx,
-			}
-
-			c.SetRGB(device, transition)
-			if transition.equals(new) || transition.equals(RGB{0, 0, 0}) {
-				break
-			}
-			time.Sleep(pause)
-		}
-		wg.Done()
-	}()
-}
-
-func (c *controller) smoothTransitionLum(device *cbyge.ControllerDevice, new RGB,
-	steps int, wg *sync.WaitGroup, pause time.Duration) {
-	go func() {
-		start := 100
-		for i := 0; i < steps; i++ {
-			lum := start / (i + 1)
-			c.SetLum(device, lum)
-		}
-		c.SetRGB(device, new)
-		wg.Done()
-	}()
 }
 
 func (c *controller) SwitchMode(newMode string) error {
@@ -358,6 +332,50 @@ func (c *controller) SwitchMode(newMode string) error {
 		c.userinput = nil
 	}
 	return c.mode.onSwitch(c)
+}
+
+func (c *controller) getLastColor(device *cbyge.ControllerDevice) optional.Optional[colors.RGB] {
+	rgb, ok := c.lastColor[device.DeviceID()]
+	if !ok {
+		return optional.Optional[colors.RGB]{}
+	} else {
+		return optional.WithValue(&rgb)
+	}
+}
+
+func (c *controller) assignRandomColors(devices []*cbyge.ControllerDevice) map[string]colors.RGB {
+	out := make(map[string]colors.RGB, len(devices))
+	for _, device := range devices {
+		var color colors.RGB
+		// grab last color of this device
+		lastColor, ok := c.lastColor[device.DeviceID()]
+		// attempt to get a random color
+	outer:
+		for attempts := 0; attempts < 1000; attempts++ {
+			color = colors.BaseColors[indexRandom(c)]
+			// does this color match the device's current color?
+			if ok && color == lastColor {
+				continue outer
+			}
+			// did another device get assigned this color within this outer loop?
+			for _, deviceColor := range out {
+				if deviceColor == color {
+					continue outer
+				}
+			}
+
+			break outer
+		}
+		// color passed our validation, assign it
+		out[device.DeviceID()] = color
+		c.lastColor[device.DeviceID()] = color
+	}
+
+	return out
+}
+
+func indexRandom(cont *controller) int {
+	return rand.Intn(len(colors.BaseColors))
 }
 
 func scanInput(component string, prompt string) string {
